@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulk Certificate Generator</title>
+<style>
+  :root { --bg:#f6f7f9; --fg:#1b1f24; --card:#fff; --border:#d8dce2; --accent:#1f3a5f; --ok:#1a7f37; --bad:#c62828; --warn:#9a6700; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171a; --fg:#e6e8eb; --card:#1d2125; --border:#343a40; --accent:#6ea8fe; --ok:#56d364; --bad:#ff7b72; --warn:#e3b341; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+  main { max-width:820px; margin:0 auto; display:grid; gap:20px; }
+  h1 { margin:0; font-size:24px; }
+  h2 { margin:0 0 12px; font-size:17px; }
+  section { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:18px; }
+  label { display:block; font-weight:600; margin:12px 0 4px; }
+  input, textarea { width:100%; padding:8px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+  textarea { min-height:140px; font-family: ui-monospace, monospace; font-size:13px; }
+  .row { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+  @media (max-width:600px) { .row { grid-template-columns:1fr; } }
+  button, a.btn { display:inline-block; margin-top:14px; padding:9px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
+  @media (prefers-color-scheme: dark) { button, a.btn { color:#111; } }
+  button:disabled { opacity:.5; cursor:default; }
+  .hint { color:var(--warn); font-size:13px; margin-top:4px; }
+  .error { color:var(--bad); margin-top:10px; }
+  .muted { opacity:.7; font-size:13px; }
+  .stats { display:flex; gap:16px; flex-wrap:wrap; margin:10px 0; }
+  .stats b { font-size:20px; display:block; }
+  .bar { height:8px; background:var(--border); border-radius:4px; overflow:hidden; }
+  .bar > div { height:100%; background:var(--ok); width:0; transition:width .3s; }
+  table { width:100%; border-collapse:collapse; margin-top:14px; font-size:14px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+  .success { color:var(--ok); } .failed { color:var(--bad); } .pending { color:var(--warn); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Bulk Certificate Generator</h1>
+
+  <section>
+    <h2>New job</h2>
+    <form id="form">
+      <div class="row">
+        <div><label for="title">Course / event title</label><input id="title" required value="Python 101"></div>
+        <div><label for="issuer">Issuer</label><input id="issuer" required value="Acme Academy"></div>
+        <div><label for="date">Issue date</label><input id="date" required></div>
+      </div>
+      <label for="recipients">Recipients <span class="muted">(one per line: <code>name, email</code>; email optional)</span></label>
+      <textarea id="recipients" required placeholder="Asha Rao, asha@example.com&#10;Ben Lee"></textarea>
+      <div class="hint">Invalid rows are reported as failed; valid ones are still generated.</div>
+      <button id="submit" type="submit">Generate certificates</button>
+      <div id="formError" class="error" hidden></div>
+    </form>
+  </section>
+
+  <section id="result" hidden>
+    <h2>Job <span id="jobId" class="muted"></span></h2>
+    <div><strong id="status"></strong></div>
+    <div class="bar"><div id="progress"></div></div>
+    <div class="stats">
+      <div><b id="total">0</b>total</div>
+      <div><b id="succeeded" class="success">0</b>succeeded</div>
+      <div><b id="failed" class="failed">0</b>failed</div>
+      <div><b id="pending" class="pending">0</b>pending</div>
+    </div>
+    <a id="zip" class="btn" hidden>Download all (ZIP)</a>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Status</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+$("date").value = new Date().toISOString().slice(0, 10);
+let timer = null;
+
+function parseRecipients(text) {
+  return text.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
+    const i = line.lastIndexOf(",");
+    if (i === -1) return { name: line };
+    return { name: line.slice(0, i).trim(), email: line.slice(i + 1).trim() || null };
+  });
+}
+
+function cell(text, cls) {
+  const td = document.createElement("td");
+  td.textContent = text ?? "";
+  if (cls) td.className = cls;
+  return td;
+}
+
+function render(job) {
+  $("result").hidden = false;
+  $("jobId").textContent = job.id;
+  $("status").textContent = job.status.replaceAll("_", " ");
+  for (const k of ["total", "succeeded", "failed", "pending"]) $(k).textContent = job[k];
+  const done = job.succeeded + job.failed;
+  $("progress").style.width = (job.total ? (done / job.total) * 100 : 0) + "%";
+  if (job.succeeded > 0) { $("zip").hidden = false; $("zip").href = `/jobs/${job.id}/download`; }
+  else $("zip").hidden = true;
+
+  const tbody = $("rows");
+  tbody.replaceChildren();
+  for (const c of job.certificates || []) {
+    const tr = document.createElement("tr");
+    tr.append(cell(c.position + 1), cell(c.recipient_name), cell(c.recipient_email));
+    tr.append(cell(c.error ? `${c.status}: ${c.error}` : c.status, c.status));
+    const td = document.createElement("td");
+    if (c.download_url) {
+      const a = document.createElement("a");
+      a.href = c.download_url; a.textContent = "PDF";
+      td.append(a);
+    }
+    tr.append(td);
+    tbody.append(tr);
+  }
+}
+
+async function poll(id) {
+  clearTimeout(timer);
+  try {
+    const r = await fetch(`/jobs/${id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const job = await r.json();
+    render(job);
+    if (job.status === "pending" || job.status === "processing") {
+      timer = setTimeout(() => poll(id), 1000);
+    } else {
+      $("submit").disabled = false;
+    }
+  } catch (e) {
+    $("formError").textContent = "Could not fetch job status: " + e.message;
+    $("formError").hidden = false;
+    $("submit").disabled = false;
+  }
+}
+
+$("form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  $("formError").hidden = true;
+  const recipients = parseRecipients($("recipients").value);
+  if (!recipients.length) { $("formError").textContent = "Add at least one recipient."; $("formError").hidden = false; return; }
+  $("submit").disabled = true;
+  try {
+    const r = await fetch("/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: $("title").value, issuer: $("issuer").value, issue_date: $("date").value, recipients }),
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      const detail = Array.isArray(body.detail) ? body.detail.map(d => `${d.loc.slice(1).join(".")}: ${d.msg}`).join("; ") : body.detail;
+      throw new Error(detail || `HTTP ${r.status}`);
+    }
+    poll((await r.json()).id);
+  } catch (e) {
+    $("formError").textContent = e.message;
+    $("formError").hidden = false;
+    $("submit").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
